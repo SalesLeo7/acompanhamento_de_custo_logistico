@@ -7,7 +7,34 @@ st.set_page_config(page_title="Dashboard Financeiro", layout="wide")
 st.title("Dashboard Financeiro - Acompanhamento de Custos")
 
 # =========================
-# Upload do arquivo
+# FORMATAÇÃO REAL
+# =========================
+def formatar_real(valor):
+    return f"R$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+# =========================
+# LIMPEZA DE VALOR (ROBUSTA)
+# =========================
+def limpar_valor(valor):
+    if pd.isna(valor):
+        return None
+
+    valor = str(valor).strip()
+
+    if ',' in valor and '.' in valor:
+        valor = valor.replace('.', '').replace(',', '.')
+    elif ',' in valor:
+        valor = valor.replace(',', '.')
+    else:
+        valor = valor
+
+    try:
+        return float(valor)
+    except:
+        return None
+
+# =========================
+# UPLOAD
 # =========================
 arquivo = st.file_uploader("Carregue sua planilha Excel", type=["xlsx"])
 
@@ -15,15 +42,13 @@ arquivo = st.file_uploader("Carregue sua planilha Excel", type=["xlsx"])
 def carregar_dados(file):
     df = pd.read_excel(file)
 
-    # Padronização
     df.columns = df.columns.str.strip()
 
-    # Converter datas
     df['Mês'] = pd.to_datetime(df['Mês'], errors='coerce')
     df['ENVIADO'] = pd.to_datetime(df['ENVIADO'], errors='coerce')
 
-    # Garantir valor numérico
-    df['VALOR'] = pd.to_numeric(df['VALOR'], errors='coerce')
+    # CORREÇÃO PRINCIPAL
+    df['VALOR'] = df['VALOR'].apply(limpar_valor)
 
     return df
 
@@ -31,36 +56,25 @@ if arquivo:
     df = carregar_dados(arquivo)
 
     # =========================
-    # SIDEBAR (Filtros)
+    # VALIDAÇÃO
+    # =========================
+    if df['VALOR'].max() > 1e9:
+        st.error("Valores extremamente altos detectados. Verifique a base.")
+
+    # =========================
+    # FILTROS
     # =========================
     st.sidebar.header("Filtros")
 
-    data_min = df['Mês'].min()
-    data_max = df['Mês'].max()
-
     intervalo_data = st.sidebar.date_input(
         "Período",
-        [data_min, data_max]
+        [df['Mês'].min(), df['Mês'].max()]
     )
 
-    fornecedor = st.sidebar.multiselect(
-        "Fornecedor",
-        df['FORNECEDOR'].dropna().unique()
-    )
-
-    categoria = st.sidebar.multiselect(
-        "Categoria",
-        df['Account in PT'].dropna().unique()
-    )
-
-    centro_custo = st.sidebar.multiselect(
-        "Centro de Custo",
-        df['COST CENTER'].dropna().unique()
-    )
-
-    # =========================
-    # Aplicar filtros
-    # =========================
+    fornecedor = st.sidebar.multiselect("Fornecedor", df['FORNECEDOR'].dropna().unique())
+    categoria = st.sidebar.multiselect("Categoria", df['Account in PT'].dropna().unique())
+    centro_custo = st.sidebar.multiselect("Centro de Custo", df['COST CENTER'].dropna().unique())
+    solicitante = st.sidebar.multiselect("Solicitante",df['SOLICITANTE'].dropna().unique())
     df_filtrado = df.copy()
 
     if len(intervalo_data) == 2:
@@ -78,33 +92,63 @@ if arquivo:
     if centro_custo:
         df_filtrado = df_filtrado[df_filtrado['COST CENTER'].isin(centro_custo)]
 
+    if solicitante:
+        df_filtrado = df_filtrado[df_filtrado['SOLICITANTE'].isin(solicitante)]
+
     # =========================
     # KPIs
     # =========================
     st.subheader("Indicadores")
 
     total = df_filtrado['VALOR'].sum()
-    media = df_filtrado.groupby(df_filtrado['Mês'].dt.to_period("M"))['VALOR'].sum().mean()
+
+    media = df_filtrado.groupby(
+        df_filtrado['Mês'].dt.to_period("M")
+    )['VALOR'].sum().mean()
 
     maior_categoria = df_filtrado.groupby('Account in PT')['VALOR'].sum().idxmax()
 
-    # Variação mês a mês
-    mensal = df_filtrado.groupby(df_filtrado['Mês'].dt.to_period("M"))['VALOR'].sum().sort_index()
+    mensal = df_filtrado.groupby(
+        df_filtrado['Mês'].dt.to_period("M")
+    )['VALOR'].sum().sort_index()
 
-    if len(mensal) >= 2:
+    variacao = 0
+    if len(mensal) >= 2 and mensal.iloc[-2] != 0:
         variacao = ((mensal.iloc[-1] - mensal.iloc[-2]) / mensal.iloc[-2]) * 100
-    else:
-        variacao = 0
 
     col1, col2, col3, col4 = st.columns(4)
 
-    col1.metric("Custo Total", f"R$ {total:,.2f}")
-    col2.metric("Média Mensal", f"R$ {media:,.2f}")
+    col1.metric("Custo Total", formatar_real(total))
+    col2.metric("Média Mensal", formatar_real(media))
     col3.metric("Maior Categoria", maior_categoria)
     col4.metric("Variação Mensal", f"{variacao:.2f}%")
 
     # =========================
-    # Gráfico de tendência
+    # SOLICITANTE (CORRIGIDO)
+    # =========================
+    if 'SOLICITANTE' in df_filtrado.columns:
+
+        st.subheader("💼 Custos por Solicitante")
+
+        df_solic = df_filtrado.groupby('SOLICITANTE')['VALOR'].sum().reset_index()
+        df_solic = df_solic.sort_values(by='VALOR', ascending=False).head(10)
+
+        fig_solic = px.bar(
+            df_solic,
+            x='VALOR',
+            y='SOLICITANTE',
+            orientation='h'
+        )
+
+        fig_solic.update_layout(yaxis={'categoryorder': 'total ascending'})
+
+        st.plotly_chart(fig_solic, use_container_width=True)
+
+    else:
+        st.warning("⚠️ Coluna 'SOLICITANTE' não encontrada.")
+
+    # =========================
+    # EVOLUÇÃO
     # =========================
     st.subheader("Evolução dos Custos")
 
@@ -114,7 +158,7 @@ if arquivo:
     st.plotly_chart(fig_linha, use_container_width=True)
 
     # =========================
-    # Custos por categoria
+    # CATEGORIA
     # =========================
     st.subheader("Custos por Categoria")
 
@@ -125,7 +169,7 @@ if arquivo:
     st.plotly_chart(fig_bar, use_container_width=True)
 
     # =========================
-    # Top fornecedores
+    # FORNECEDOR
     # =========================
     st.subheader("Top Fornecedores")
 
@@ -136,7 +180,7 @@ if arquivo:
     st.plotly_chart(fig_top, use_container_width=True)
 
     # =========================
-    # Pizza distribuição
+    # DISTRIBUIÇÃO
     # =========================
     st.subheader("Distribuição dos Custos")
 
@@ -144,107 +188,73 @@ if arquivo:
     st.plotly_chart(fig_pie, use_container_width=True)
 
     # =========================
-    # Insights automáticos
+    # INSIGHTS
     # =========================
     st.subheader("Insights Automáticos")
 
     if len(mensal) >= 2:
         if variacao > 0:
-            st.warning(f"📈 Os custos aumentaram {variacao:.2f}% no último mês.")
+            st.warning(f"Os custos aumentaram {variacao:.2f}% no último mês.")
         else:
-            st.success(f"📉 Os custos reduziram {abs(variacao):.2f}% no último mês.")
+            st.success(f"Os custos reduziram {abs(variacao):.2f}% no último mês.")
 
-    top_categoria = df_categoria.iloc[0]
-    st.info(f"💡 A categoria com maior custo é '{top_categoria['Account in PT']}'.")
+    if not df_categoria.empty:
+        st.info(f"Maior impacto: {df_categoria.iloc[0]['Account in PT']}")
 
     # =========================
-    # Tabela detalhada
+    # DEBUG (OPCIONAL)
+    # =========================
+    with st.expander("Debug de dados"):
+        st.write("Total geral:", total)
+        st.write("Máximo valor:", df['VALOR'].max())
+        st.write("Amostra:", df[['SOLICITANTE', 'VALOR']].head())
+
+    # =========================
+    # TABELA
     # =========================
     st.subheader("Dados Detalhados")
 
     st.dataframe(df_filtrado, use_container_width=True)
 
-    # Download
     csv = df_filtrado.to_csv(index=False).encode('utf-8')
-    st.download_button(
-        "⬇️ Baixar CSV",
-        csv,
-        "dados_filtrados.csv",
-        "text/csv"
-    )
+    st.download_button("Baixar CSV", csv, "dados_filtrados.csv", "text/csv")
+
+    # =========================
+    # PREVISÃO
+    # =========================
+    try:
+        from prophet import Prophet
+
+        st.subheader("🔮 Previsão de Custos")
+
+        df_forecast = df_filtrado.groupby('Mês')['VALOR'].sum().reset_index()
+        df_forecast = df_forecast.rename(columns={'Mês': 'ds', 'VALOR': 'y'})
+        df_forecast = df_forecast.dropna()
+
+        df_forecast['ds'] = pd.to_datetime(df_forecast['ds']).dt.to_period('M').dt.to_timestamp()
+        df_forecast = df_forecast.set_index('ds').asfreq('MS').fillna(0).reset_index()
+
+        if len(df_forecast) >= 6:
+
+            modelo = Prophet(yearly_seasonality=True)
+
+            modelo.fit(df_forecast)
+
+            futuro = modelo.make_future_dataframe(periods=6, freq='MS')
+            previsao = modelo.predict(futuro)
+
+            fig_prev = px.line()
+
+            fig_prev.add_scatter(x=df_forecast['ds'], y=df_forecast['y'], mode='lines+markers', name='Real')
+            fig_prev.add_scatter(x=previsao['ds'], y=previsao['yhat'], mode='lines', name='Previsto')
+
+            st.plotly_chart(fig_prev, use_container_width=True)
+
+        else:
+            st.info("⚠️ Necessário pelo menos 6 meses de dados.")
+
+    except:
+        st.warning("⚠️ Prophet não instalado. Previsão desativada.")
 
 else:
     st.info("Faça upload de um arquivo para iniciar.")
-
-# =========================
-# Previsão dos resultados
-# =========================
-
-from prophet import Prophet
-
-if arquivo:
-
-    st.subheader("Previsão de Custos")
-
-    df_forecast = df_filtrado.copy()
-
-    df_forecast = df_forecast.groupby('Mês')['VALOR'].sum().reset_index()
-    df_forecast = df_forecast.rename(columns={'Mês': 'ds', 'VALOR': 'y'})
-
-    df_forecast = df_forecast.dropna()
-
-    # Padronizar datas
-    df_forecast['ds'] = pd.to_datetime(df_forecast['ds']).dt.to_period('M').dt.to_timestamp()
-
-    # Garantir continuidade
-    df_forecast = df_forecast.set_index('ds').asfreq('MS').fillna(0).reset_index()
-
-    if len(df_forecast) >= 6:
-
-        modelo = Prophet(
-            yearly_seasonality=True,
-            weekly_seasonality=False,
-            daily_seasonality=False
-        )
-
-        modelo.fit(df_forecast)
-
-        futuro = modelo.make_future_dataframe(periods=6, freq='MS')
-
-        previsao = modelo.predict(futuro)
-
-        fig_prev = px.line()
-
-        fig_prev.add_scatter(
-            x=df_forecast['ds'],
-            y=df_forecast['y'],
-            mode='lines+markers',
-            name='Real'
-        )
-
-        fig_prev.add_scatter(
-            x=previsao['ds'],
-            y=previsao['yhat'],
-            mode='lines',
-            name='Previsto'
-        )
-
-        st.plotly_chart(fig_prev, use_container_width=True)
-
-        st.subheader("Insight de Tendência")
-
-        ultimo_real = df_forecast['y'].iloc[-1]
-        ultimo_prev = previsao['yhat'].iloc[-1]
-
-        if ultimo_real != 0:
-            variacao_prev = ((ultimo_prev - ultimo_real) / ultimo_real) * 100
-        else:
-            variacao_prev = 0
-
-        if variacao_prev > 0:
-            st.warning(f"📈 Tendência de aumento de {variacao_prev:.2f}% nos próximos meses.")
-        else:
-            st.success(f"📉 Tendência de redução de {abs(variacao_prev):.2f}% nos próximos meses.")
-
-    else:
-        st.info("⚠️ Necessário pelo menos 6 meses de dados para previsão.")
